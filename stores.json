@@ -1,0 +1,50 @@
+{
+  "NBMBN": {
+    "mk_store": "Fletcher Jones MotorCars",
+    "department_uuid": "9300552438db5e8bd536e9ec9f726e18ec670f6573c506a28aabede266a94300"
+  },
+  "BHMBN": {
+    "mk_store": "Mercedes-Benz of Beverly Hills",
+    "department_uuid": "b6d68ad052138c4a038cd627c7c4a87287e8efc45e6337671752f454a8e86794"
+  },
+  "ONMBN": {
+    "mk_store": "Mercedes-Benz of Ontario",
+    "department_uuid": "1b580886222ca5e854acd0d2a2f20a7f075cdf6274ef6e0ecab0c1bf864a0b7a"
+  },
+  "LVMBN": {
+    "mk_store": "Fletcher Jones Imports",
+    "department_uuid": "de09596276f90a80538e992c2f9d23120c3d874d461c2b6ed844d78c3df26b7b"
+  },
+  "HEMBN": {
+    "mk_store": "Mercedes-Benz of Henderson",
+    "department_uuid": "a6b6fee86229c20466a309157af433068ec3b3329e40b08c50b3ff4f9b0f9185"
+  },
+  "AUDFJ": {
+    "mk_store": "Audi Fletcher Jones",
+    "department_uuid": "b227320d2211e3f89bb5985bef82dffaad46bb005aacdc3c904127545aa052d0"
+  },
+  "BHAUD": {
+    "mk_store": "Audi Beverly Hills",
+    "department_uuid": "755ec42bf359b482ca09e44f7ca6565a9e84a4319882f98ff544acccb28a2693"
+  },
+  "AUDLB": {
+    "mk_store": "Audi Long Beach",
+    "department_uuid": "d5772559b38d3c66315bc041c4911ee60f2652975059f6506aef4d0a7ffda61e"
+  },
+  "CATOY": {
+    "mk_store": "Fletcher Jones Toyota of Carson",
+    "department_uuid": "39bb5242db17199860027977e4c38711c9d3ae74d0a463f961f57d82eead8908"
+  },
+  "SMBMW": {
+    "mk_store": "BMW of Santa Monica",
+    "department_uuid": "4ce4471a1070dd65b5eb7b25de6af74b391305e2c364cd4878b6b37326b2a1af"
+  },
+  "LBPOR": {
+    "mk_store": "Porsche Long Beach",
+    "department_uuid": "d1f5c9c0eae2aa911ba892ee35cb48a3a62ff0566acee5b9c12ce80862eb287c"
+  },
+  "L2MBN": {
+    "mk_store": "Fletcher Jones Van Center",
+    "department_uuid": "e4da68069659daabacebcdb5e08fb7841ed737de810a159b42f0dc84f2674054"
+  }
+}

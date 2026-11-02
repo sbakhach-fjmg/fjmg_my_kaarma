@@ -42,7 +42,7 @@ uv run mykaarma load --limit 25      # first N used VINs; nothing is pruned
 uv run mykaarma load                 # all used inventory; prunes VINs that left inventory
 ```
 
-Each VIN is checked against the 12 Service departments and committed in its own transaction. A department error keeps the VIN's previous rows and records `error`, and the next run retries it. VINs checked without error in the last 20 hours are skipped (`--skip-fresh 0` rechecks everything), so a stopped run picks up where it left off. Customer identifiers are never stored. Employee identifiers are.
+Each VIN is checked only at its current store's Service department, using `stores.json` (inventory `StoreID` → myKaarma department, committed), and is committed in its own transaction. A VIN at a store missing from `stores.json` is recorded with an error and no API calls. A department error keeps the VIN's previous rows and records `error`, and the next run retries it. VINs checked without error in the last 20 hours are skipped (`--skip-fresh 0` rechecks everything), so a stopped run picks up where it left off. Customer identifiers are never stored. Employee identifiers are.
 
 ## How credentials are kept out of output
 

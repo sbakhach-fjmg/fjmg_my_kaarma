@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DEPARTMENTS_FILE = ROOT / "departments.json"
+STORES_FILE = ROOT / "stores.json"
 
 
 def load_env(path: Path = ROOT / ".env") -> None:
@@ -37,3 +38,9 @@ def departments(path: Path | None = None) -> list[dict]:
 def save_departments(rows: list[dict], path: Path | None = None) -> None:
     path = path or DEPARTMENTS_FILE
     path.write_text(json.dumps(rows, indent=2) + "\n")
+
+
+def stores(path: Path | None = None) -> dict[str, dict]:
+    """Inventory StoreID -> that store's myKaarma Service department ({mk_store, department_uuid}). Committed."""
+    path = path or STORES_FILE
+    return {k.upper(): v for k, v in json.loads(path.read_text()).items()}

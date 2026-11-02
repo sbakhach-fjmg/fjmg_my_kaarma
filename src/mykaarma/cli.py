@@ -97,9 +97,7 @@ def cmd_load(args) -> int:
     conn = os.environ.get("MSSQL_CONNECTION", "")
     if not conn:
         raise ConfigError("MSSQL_CONNECTION not set in .env")
-    depts = load.service_departments(config.departments())
-    if not depts:
-        raise ConfigError("no Service departments with the inspection scope: run `mykaarma check --save` first")
+    stores = load.store_departments(config.stores())
     _client().close()   # fail on missing credentials before touching the database
     db = Mssql(conn)
     try:
@@ -112,7 +110,10 @@ def cmd_load(args) -> int:
         full = args.limit is None
         if not full:
             cars = cars[:args.limit]
-        stats = load.run(cars, depts, db, _client, workers=args.workers, skip_fresh_hours=args.skip_fresh, prune=full)
+        unmapped = sorted({c["dealer_code"] for c in cars} - set(stores))
+        if unmapped:
+            print(f"no stores.json entry for {', '.join(map(str, unmapped))}: those VINs are recorded with an error")
+        stats = load.run(cars, stores, db, _client, workers=args.workers, skip_fresh_hours=args.skip_fresh, prune=full)
     finally:
         db.close()
     print(f"done: {stats['checked']} checked, {stats['skipped']} skipped, {stats['errors']} with errors, "
@@ -132,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--dept", help="limit to matching departments (UUID or part of 'store department')")
     r.add_argument("--all", action="store_true", help="query every saved department, not just Service")
     r.set_defaults(func=cmd_recommendations)
-    ld = sub.add_parser("load", help="check every used-inventory VIN and write results to SQL Server")
+    ld = sub.add_parser("load", help="check each used-inventory VIN at its current store and write results to SQL Server")
     ld.add_argument("--limit", type=int, help="only the first N VINs (no pruning of VINs that left inventory)")
     ld.add_argument("--workers", type=int, default=6, help="parallel API workers (default 6)")
     ld.add_argument("--skip-fresh", type=float, default=20, metavar="HOURS",

@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from mykaarma import config, extract, load
-from mykaarma.client import MPI_SCOPE, ApiError, MyKaarma
+from mykaarma.client import ApiError, MyKaarma
 
 VIN = "WDDZF4JB1HA123456"
 NOW = datetime(2026, 11, 2, 12, 0, 0)
@@ -88,8 +88,7 @@ def api(fail_dept: str | None = None):
     return lambda: MyKaarma("u", "p", transport=httpx.MockTransport(handler), sleep=lambda s: None)
 
 
-DEPTS = [{"business": "A", "department": "Service", "department_uuid": "d-a", "scopes": [MPI_SCOPE]},
-         {"business": "B", "department": "Service", "department_uuid": "d-b", "scopes": [MPI_SCOPE]}]
+STORES = {"NBMBN": {"business": "A", "department_uuid": "d-a"}, "BHMBN": {"business": "B", "department_uuid": "d-b"}}
 CARS = [{"vin": VIN, "stock_no": "S1", "dealer_code": "NBMBN"}, {"vin": "1HGCM82633A004352", "stock_no": "S2", "dealer_code": "BHMBN"}]
 
 
@@ -118,19 +117,42 @@ class FakeDb:
 
 def test_load_writes_each_vin_once_and_vins_without_inspections_still_get_a_lookup():
     db = FakeDb()
-    stats = load.run(CARS, DEPTS, db, api(), workers=2, log=lambda s: None)
+    stats = load.run(CARS, STORES, db, api(), workers=2, log=lambda s: None)
     assert sorted(db.calls) == sorted(c["vin"] for c in CARS)
     assert stats["checked"] == 2 and stats["errors"] == 0 and stats["inspections"] == 1 and stats["recommendations"] == 3
-    assert db.lookups[VIN]["inspections_found"] == 1 and db.lookups[VIN]["departments_checked"] == 2
+    assert db.lookups[VIN]["inspections_found"] == 1 and db.lookups[VIN]["departments_checked"] == 1
     assert db.lookups["1HGCM82633A004352"]["inspections_found"] == 0
     assert db.rows[VIN][0][0]["store"] == "A"
 
 
+def test_only_the_current_store_is_checked():
+    seen = []
+
+    def make():
+        def handler(req):
+            seen.append(req.url.path.split("/")[5])
+            return api()()._http._transport.handle_request(req)
+        return MyKaarma("u", "p", transport=httpx.MockTransport(handler), sleep=lambda s: None)
+
+    load.run(CARS, STORES, FakeDb(), make, workers=1, log=lambda s: None)
+    assert seen.count("d-b") == 1                      # BHMBN car: one search, nothing found
+    assert set(seen) == {"d-a", "d-b"} and seen.count("d-a") == 2   # NBMBN car: search + one detail
+
+
+def test_unmapped_store_is_recorded_as_an_error_without_api_calls():
+    db = FakeDb()
+    car = {"vin": "1FTFW1ET5DFC10312", "stock_no": "S9", "dealer_code": "XXXXX"}
+    make = lambda: MyKaarma("u", "p", transport=httpx.MockTransport(lambda r: pytest.fail("API called")))
+    stats = load.run([car], STORES, db, make, workers=1, log=lambda s: None)
+    assert stats["errors"] == 1 and "no myKaarma department for store 'XXXXX'" in db.lookups[car["vin"]]["error"]
+    assert db.lookups[car["vin"]]["departments_checked"] == 0
+
+
 def test_failing_department_keeps_previous_rows_and_records_error():
     db = FakeDb()
-    load.run(CARS[:1], DEPTS, db, api(), workers=1, log=lambda s: None)
+    load.run(CARS[:1], STORES, db, api(), workers=1, log=lambda s: None)
     before = db.rows[VIN]
-    stats = load.run(CARS[:1], DEPTS, db, api(fail_dept="d-b"), workers=1, skip_fresh_hours=0, log=lambda s: None)
+    stats = load.run(CARS[:1], STORES, db, api(fail_dept="d-a"), workers=1, skip_fresh_hours=0, log=lambda s: None)
     assert stats["errors"] == 1
     assert db.rows[VIN] is before
     assert "1 department(s) failed" in db.lookups[VIN]["error"] and "500" in db.lookups[VIN]["error"]
@@ -139,26 +161,26 @@ def test_failing_department_keeps_previous_rows_and_records_error():
 
 def test_skip_fresh_and_errored_vins_are_retried():
     db = FakeDb()
-    load.run(CARS, DEPTS, db, api(fail_dept="d-b"), workers=1, log=lambda s: None)
+    load.run(CARS, STORES, db, api(fail_dept="d-b"), workers=1, log=lambda s: None)
     db.calls.clear()
-    load.run(CARS, DEPTS, db, api(), workers=1, log=lambda s: None)
-    assert sorted(db.calls) == sorted(c["vin"] for c in CARS)       # both errored last time, so both retried
+    load.run(CARS, STORES, db, api(), workers=1, log=lambda s: None)
+    assert db.calls == ["1HGCM82633A004352"]                        # only the errored VIN is retried
     db.calls.clear()
-    stats = load.run(CARS, DEPTS, db, api(), workers=1, log=lambda s: None)
+    stats = load.run(CARS, STORES, db, api(), workers=1, log=lambda s: None)
     assert db.calls == [] and stats["skipped"] == 2
 
 
 def test_prune_only_on_request():
     db = FakeDb()
-    load.run(CARS, DEPTS, db, api(), workers=1, log=lambda s: None)
-    load.run(CARS[:1], DEPTS, db, api(), workers=1, skip_fresh_hours=0, prune=True, log=lambda s: None)
+    load.run(CARS, STORES, db, api(), workers=1, log=lambda s: None)
+    load.run(CARS[:1], STORES, db, api(), workers=1, skip_fresh_hours=0, prune=True, log=lambda s: None)
     assert list(db.lookups) == [VIN]
 
 
 def test_unexpected_payload_fails_the_vin_not_the_run(monkeypatch):
     db = FakeDb()
     monkeypatch.setattr(extract, "rows", lambda *a: (_ for _ in ()).throw(KeyError("x")))
-    stats = load.run(CARS, DEPTS, db, api(), workers=2, log=lambda s: None)
+    stats = load.run(CARS, STORES, db, api(), workers=2, log=lambda s: None)
     assert stats["checked"] == 2 and stats["errors"] == 1
     assert db.lookups[VIN]["error"] == "unexpected KeyError while extracting"
 
@@ -167,14 +189,16 @@ def test_progress_output_has_no_secrets():
     lines = []
     user, pw = "user-x", "pw-y-secret"
     make = lambda: MyKaarma(user, pw, transport=httpx.MockTransport(lambda r: httpx.Response(401)), sleep=lambda s: None)
-    load.run(CARS, DEPTS, FakeDb(), make, workers=1, log=lines.append, every=1)
+    load.run(CARS, STORES, FakeDb(), make, workers=1, log=lines.append, every=1)
     assert lines and not any(user in l or pw in l for l in lines)
 
 
-def test_service_departments_filter():
-    depts = [*DEPTS, {"business": "A", "department": "Parts", "department_uuid": "p", "scopes": [MPI_SCOPE]},
-             {"business": "C", "department": "Service", "department_uuid": "x", "scopes": ["other"]}]
-    assert [d["department_uuid"] for d in load.service_departments(depts)] == ["d-a", "d-b"]
+def test_stores_json_maps_every_store_to_one_department():
+    stores = config.stores()
+    assert len(stores) == 12 and "L2MBN" in stores
+    assert all(len(v["department_uuid"]) == 64 for v in stores.values())
+    assert len({v["department_uuid"] for v in stores.values()}) == 12
+    assert set(load.store_departments(stores)["NBMBN"]) == {"business", "department_uuid"}
 
 
 def _ddl_columns(table: str) -> list[str]:
@@ -197,5 +221,5 @@ def test_extracted_rows_have_exactly_the_table_columns():
     assert tuple(insp) == extract.INSPECTION_COLS
     assert all(tuple(r) == extract.RECOMMENDATION_COLS for r in recs)
     assert all(tuple(a) == extract.ASSOCIATE_COLS for a in assoc)
-    lookup = load.check_vin(api()(), CARS[0], DEPTS).lookup
+    lookup = load.check_vin(api()(), CARS[0], [STORES["NBMBN"]]).lookup
     assert tuple(lookup) == extract.LOOKUP_COLS

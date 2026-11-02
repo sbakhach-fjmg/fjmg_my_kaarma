@@ -1,4 +1,4 @@
-"""Check every used-inventory VIN against the Service departments and write the results to SQL Server.
+"""Check every used-inventory VIN at its current store's Service department and write the results to SQL Server.
 
 API calls run in a thread pool (one MyKaarma client per thread); all database writes happen on the calling
 thread, one transaction per VIN, so a long run can be stopped and resumed with --skip-fresh.
@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Callable, Protocol
 
 from mykaarma import extract
-from mykaarma.client import MPI_SCOPE, ApiError, MyKaarma
+from mykaarma.client import ApiError, MyKaarma
 
 
 class Sink(Protocol):
@@ -59,36 +59,45 @@ def check_vin(mk: MyKaarma, car: dict, depts: list[dict]) -> VinResult:
     return res
 
 
-def service_departments(depts: list[dict]) -> list[dict]:
-    return [d for d in depts if d["department"].strip().lower() == "service" and MPI_SCOPE in (d.get("scopes") or [MPI_SCOPE])]
+def store_departments(stores: dict[str, dict]) -> dict[str, dict]:
+    """stores.json entries in the shape check_vin takes: {dealer_code: {business, department_uuid}}."""
+    return {code: {"business": v["mk_store"], "department_uuid": v["department_uuid"]} for code, v in stores.items()}
 
 
-def run(cars: list[dict], depts: list[dict], sink: Sink, make_client: Callable[[], MyKaarma], *,
+def _failed(car: dict, departments_checked: int, error: str) -> VinResult:
+    return VinResult({"vin": car["vin"], "stock_no": car.get("stock_no"), "dealer_code": car.get("dealer_code"),
+                      "checked_at": utcnow(), "departments_checked": departments_checked, "departments_failed": 0,
+                      "inspections_found": 0, "error": error})
+
+
+def run(cars: list[dict], stores: dict[str, dict], sink: Sink, make_client: Callable[[], MyKaarma], *,
         workers: int = 6, skip_fresh_hours: float = 20, prune: bool = False,
         log: Callable[[str], None] = print, every: int = 100) -> dict:
-    """Returns counts: checked, skipped, errors, inspections, recommendations, pruned."""
+    """Each VIN is checked only at its current store's Service department (stores: dealer_code -> department).
+    Returns counts: checked, skipped, errors, inspections, recommendations, pruned."""
     all_vins = [c["vin"] for c in cars]
     fresh = sink.fresh_vins(skip_fresh_hours, utcnow()) if skip_fresh_hours > 0 else set()
     todo = [c for c in cars if c["vin"] not in fresh]
     stats = {"checked": 0, "skipped": len(cars) - len(todo), "errors": 0, "inspections": 0, "recommendations": 0, "pruned": 0}
     log(f"{len(cars)} VINs, {stats['skipped']} checked recently (skipped), {len(todo)} to check "
-        f"across {len(depts)} departments with {workers} workers")
+        f"with {workers} workers")
 
     local = threading.local()
     clients: list[MyKaarma] = []
     lock = threading.Lock()
 
     def work(car):
+        dept = stores.get((car.get("dealer_code") or "").upper())
+        if dept is None:
+            return _failed(car, 0, f"no myKaarma department for store {car.get('dealer_code')!r} in stores.json")
         if not hasattr(local, "mk"):
             local.mk = make_client()
             with lock:
                 clients.append(local.mk)
         try:
-            return check_vin(local.mk, car, depts)
+            return check_vin(local.mk, car, [dept])
         except Exception as e:   # an unexpected payload shape fails this VIN, not the run
-            return VinResult({"vin": car["vin"], "stock_no": car.get("stock_no"), "dealer_code": car.get("dealer_code"),
-                              "checked_at": utcnow(), "departments_checked": len(depts), "departments_failed": 0,
-                              "inspections_found": 0, "error": f"unexpected {type(e).__name__} while extracting"})
+            return _failed(car, 1, f"unexpected {type(e).__name__} while extracting")
 
     start = time.monotonic()
     try:
