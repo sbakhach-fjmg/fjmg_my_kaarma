@@ -27,7 +27,7 @@ uv run mykaarma recommendations WDDZF4JB1HA123456
 uv run mykaarma recommendations WDDZF4JB1HA123456 --dept newport
 ```
 
-`recommendations` queries every department saved in `departments.json`. It skips departments without the `multipoint.inspection.fetch` scope and reports a failure in one department without stopping the others.
+`recommendations` queries each store's Service department from `departments.json` (12 today). `--all` queries all 58, and `--dept` narrows to matching departments. It skips departments without the `multipoint.inspection.fetch` scope and reports a failure in one department without stopping the others.
 
 ## How credentials are kept out of output
 

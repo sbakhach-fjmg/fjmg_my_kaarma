@@ -125,3 +125,11 @@ def test_check_cli_output_has_no_secrets(monkeypatch, capsys, tmp_path):
         assert secret not in out
     saved = (tmp_path / "departments.json").read_text()
     assert "dept-parts" in saved and PW not in saved and USER not in saved
+
+
+def test_default_picks_service_departments_only():
+    depts = [{"business": b, "department": d, "department_uuid": f"{b}-{d}"}
+             for b in ("A", "B") for d in ("Service", "Parts", "Sales")]
+    assert [d["department_uuid"] for d in cli._pick(depts, None)] == ["A-Service", "B-Service"]
+    assert len(cli._pick(depts, None, all_depts=True)) == 6
+    assert [d["department_uuid"] for d in cli._pick(depts, "b parts")] == ["B-Parts"]

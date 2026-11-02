@@ -29,9 +29,10 @@ def cmd_check(args) -> int:
     return 0
 
 
-def _pick(depts: list[dict], want: str | None) -> list[dict]:
+def _pick(depts: list[dict], want: str | None, all_depts: bool = False) -> list[dict]:
+    """Default: each store's Service department, where inspections live. --dept narrows, --all widens."""
     if not want:
-        return depts
+        return depts if all_depts else [d for d in depts if d["department"].strip().lower() == "service"]
     w = want.lower()
     return [d for d in depts if d["department_uuid"].lower() == w or w in f"{d['business']} {d['department']}".lower()]
 
@@ -55,7 +56,7 @@ def cmd_recommendations(args) -> int:
     if not VIN_RE.match(vin):
         print(f"not a valid 17-character VIN: {args.vin!r}", file=sys.stderr)
         return 2
-    depts = _pick(config.departments(), args.dept)
+    depts = _pick(config.departments(), args.dept, args.all)
     if not depts:
         print("no departments: run `mykaarma check --save` first" if not args.dept else f"no department matches {args.dept!r}",
               file=sys.stderr)
@@ -90,7 +91,8 @@ def main(argv: list[str] | None = None) -> int:
     c.set_defaults(func=cmd_check)
     r = sub.add_parser("recommendations", help="recommended work for a VIN across saved departments")
     r.add_argument("vin")
-    r.add_argument("--dept", help="limit to one department (UUID or part of its name)")
+    r.add_argument("--dept", help="limit to matching departments (UUID or part of 'store department')")
+    r.add_argument("--all", action="store_true", help="query every saved department, not just Service")
     r.set_defaults(func=cmd_recommendations)
     args = p.parse_args(argv)
     try:
