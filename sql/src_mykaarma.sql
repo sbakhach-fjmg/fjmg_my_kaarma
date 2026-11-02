@@ -65,17 +65,11 @@ if object_id('dbo.vw_mykaarma__vin_recommendation_summary', 'V') is not null
 	drop view dbo.vw_mykaarma__vin_recommendation_summary;
 go
 
--- One row per checked VIN; money and severity from its latest inspection. Amounts are line-item sums
+-- One row per checked VIN; money and severity from its latest inspection that has recommendations (an empty
+-- newer inspection would otherwise hide real work), else its latest inspection. Amounts are line-item sums
 -- (unpriced lines count as 0 and are counted in unpriced_count); mk_* are myKaarma's totals for comparison.
 create view dbo.vw_mykaarma__vin_recommendation_summary as
-with ranked as (
-	select i.*,
-		row_number() over (partition by i.vin order by i.order_date desc, i.mpi_created_on desc, i.mpi_uuid) as rn,
-		count(*) over (partition by i.vin) as inspections_all_time
-	from dbo.src_mykaarma__inspections i
-), latest as (
-	select * from ranked where rn = 1
-), rec as (
+with rec as (
 	select r.mpi_uuid,
 		count(*) as rec_count,
 		sum(case when r.amount is null then 1 else 0 end) as unpriced_count,
@@ -92,6 +86,16 @@ with ranked as (
 		max(r.severity_rank) as worst_rank
 	from dbo.src_mykaarma__recommendations r
 	group by r.mpi_uuid
+), ranked as (
+	select i.*,
+		row_number() over (partition by i.vin
+			order by case when r.mpi_uuid is null then 1 else 0 end, i.order_date desc, i.mpi_created_on desc, i.mpi_uuid) as rn,
+		count(*) over (partition by i.vin) as inspections_all_time,
+		max(i.order_date) over (partition by i.vin) as last_inspection_date
+	from dbo.src_mykaarma__inspections i
+	left join rec r on r.mpi_uuid = i.mpi_uuid
+), latest as (
+	select * from ranked where rn = 1
 ), adv as (
 	select mpi_uuid, max(associate_name) as advisor_name
 	from dbo.src_mykaarma__inspection_associates
@@ -100,7 +104,7 @@ with ranked as (
 )
 select
 	v.vin, v.stock_no, v.dealer_code, v.checked_at, v.error,
-	isnull(l.inspections_all_time, 0) as inspections_all_time,
+	isnull(l.inspections_all_time, 0) as inspections_all_time, l.last_inspection_date,
 	l.store, l.order_number, l.order_date, a.advisor_name,
 	isnull(r.rec_count, 0) as rec_count, isnull(r.unpriced_count, 0) as unpriced_count,
 	isnull(r.recommended_amt, 0) as recommended_amt, isnull(r.approved_amt, 0) as approved_amt,
