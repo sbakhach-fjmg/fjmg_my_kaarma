@@ -31,7 +31,7 @@ uv run mykaarma recommendations WDDZF4JB1HA123456 --dept newport
 
 ## Load used inventory into SQL Server
 
-Results land in `dbo.src_mykaarma__*` tables in the database that holds `Current_Inventory`. The stakeholder's view is `dbo.vw_mykaarma__vin_recommendation_summary`: one row per VIN, with the recommended, approved, declined and pending amounts and the severity counts from the VIN's latest inspection.
+Results land in `dbo.src_mykaarma__*` tables in the database that holds `Current_Inventory`. The stakeholder's view is `dbo.vw_mykaarma__vin_recommendation_summary`: one row per VIN, with the recommended, approved, declined and pending amounts and the severity counts from the VIN's latest inspection that has recommendations (or its latest inspection if none do). `last_inspection_date` shows when a newer, empty inspection exists.
 
 1. Add `MSSQL_CONNECTION` to `.env`, using the template in `.env.example` (Windows integrated auth, no password).
 2. Run `sql/src_mykaarma.sql` once in SSMS. It's re-runnable, and the loader never creates tables.
