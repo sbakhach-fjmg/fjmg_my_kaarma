@@ -31,15 +31,15 @@ uv run mykaarma recommendations WDDZF4JB1HA123456 --dept newport
 
 ## Load used inventory into SQL Server
 
-Results land in `dbo.src_mykaarma__*` tables in the database that holds `Current_Inventory`. The stakeholder's view is `dbo.vw_mykaarma__vin_recommendation_summary`: one row per VIN, with the recommended, approved, declined and pending amounts and the severity counts from the VIN's latest inspection that has recommendations (or its latest inspection if none do). `last_inspection_date` shows when a newer, empty inspection exists.
+Results land in `dbo.src_mykaarma__*` tables in the database that holds `Current_Inventory`. The stakeholder's view is `dbo.vw_mykaarma__vin_recommendation_summary`: one row per VIN ever checked (`where in_inventory = 1` for current stock), with the recommended, approved, declined and pending amounts and the severity counts from the VIN's latest inspection that has recommendations (or its latest inspection if none do). `last_inspection_date` shows when a newer, empty inspection exists.
 
 1. Add `MSSQL_CONNECTION` to `.env`, using the template in `.env.example` (Windows integrated auth, no password).
-2. Run `sql/src_mykaarma.sql` once in SSMS. It's re-runnable (it also widens columns on tables created by an older version), and the loader never creates tables.
+2. Run `sql/src_mykaarma.sql` once in SSMS. It's re-runnable (it also adds or widens columns on tables created by an older version), and the loader never creates tables. The loader stops with a message naming anything missing.
 3. Run the loader:
 
 ```
-uv run mykaarma load --limit 25      # first N used VINs; nothing is pruned
-uv run mykaarma load                 # all used inventory; prunes VINs that left inventory
+uv run mykaarma load --limit 25      # first N used VINs; doesn't update which VINs are in inventory
+uv run mykaarma load                 # all used inventory; flags VINs that left inventory
 uv run mykaarma load --workers 8     # parallel API workers (default 6)
 uv run mykaarma load --skip-fresh 0  # recheck everything (default skips VINs checked in the last 20 hours)
 ```
@@ -52,11 +52,13 @@ A full run covers about 1,600 VINs in under 5 minutes.
 
 **Failures and resuming.** Each VIN is written in its own transaction. If a department call fails (after 3 retries on 429, 5xx and timeouts) or the database rejects a row, the VIN's previous rows stay, its `error` column is set, and the next run retries it. A stopped run picks up where it left off, because VINs checked without error recently are skipped. The run exits with status 1 if any VIN errored.
 
-**Tables** (current state only; each load replaces a VIN's rows):
+**History.** Nothing is deleted. myKaarma returns every inspection a VIN has had, so past ROs stay as each check replaces the VIN's inspection rows. When a full run no longer finds a VIN in used inventory, the VIN keeps its last known state with `in_inventory = 0` and isn't rechecked. If it comes back into stock, it's checked again. `first_seen` is the first check, and `last_seen` is the last full run that found it in stock. What isn't kept is how a line changed over time: if a line goes from pending to approved, only "approved" is stored.
+
+**Tables:**
 
 | Table | One row per |
 |---|---|
-| `src_mykaarma__vin_lookups` | VIN checked: when, at which store, how many inspections, and `error` (null = OK) |
+| `src_mykaarma__vin_lookups` | VIN ever checked: when, at which store, how many inspections, `error` (null = OK), and `in_inventory`, `first_seen`, `last_seen` |
 | `src_mykaarma__inspections` | inspection (one per RO), with myKaarma's own totals (`mk_*`) and the raw JSON minus customer identifiers |
 | `src_mykaarma__recommendations` | recommended line: check, description, severity, status, decision, amount, op code |
 | `src_mykaarma__inspection_associates` | employee on an inspection: advisor, technician or assignee |

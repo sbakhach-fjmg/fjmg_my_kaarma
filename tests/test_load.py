@@ -102,17 +102,24 @@ class FakeDb:
 
     def replace_vin(self, lookup, inspections, recs, associates):
         self.calls.append(lookup["vin"])
+        seen = {"in_inventory": True, "first_seen": lookup["checked_at"], "last_seen": lookup["checked_at"]}
+        old = self.lookups.get(lookup["vin"], seen)
         if lookup["error"]:
-            self.lookups[lookup["vin"]] = {**self.lookups.get(lookup["vin"], {}), **{k: v for k, v in lookup.items() if k != "inspections_found"}}
+            self.lookups[lookup["vin"]] = {**old, **{k: v for k, v in lookup.items() if k != "inspections_found"}}
         else:
-            self.lookups[lookup["vin"]] = lookup
+            self.lookups[lookup["vin"]] = {**old, **lookup}
             self.rows[lookup["vin"]] = (inspections, recs, associates)
+        self.lookups[lookup["vin"]]["in_inventory"] = True
 
-    def prune(self, keep):
-        gone = [v for v in self.lookups if v not in keep]
-        for v in gone:
-            self.lookups.pop(v); self.rows.pop(v, None)
-        return len(gone)
+    def mark_inventory(self, in_stock, now):
+        gone = 0
+        for v, l in self.lookups.items():
+            if v in in_stock:
+                l.update(in_inventory=True, last_seen=now)
+            elif l["in_inventory"]:
+                l["in_inventory"] = False
+                gone += 1
+        return gone
 
 
 def test_load_writes_each_vin_once_and_vins_without_inspections_still_get_a_lookup():
@@ -170,11 +177,21 @@ def test_skip_fresh_and_errored_vins_are_retried():
     assert db.calls == [] and stats["skipped"] == 2
 
 
-def test_prune_only_on_request():
+def test_vins_that_leave_inventory_are_kept_and_flagged_not_rechecked():
     db = FakeDb()
-    load.run(CARS, STORES, db, api(), workers=1, log=lambda s: None)
-    load.run(CARS[:1], STORES, db, api(), workers=1, skip_fresh_hours=0, prune=True, log=lambda s: None)
-    assert list(db.lookups) == [VIN]
+    sold = CARS[1]["vin"]
+    load.run(CARS, STORES, db, api(), workers=1, track_inventory=True, log=lambda s: None)
+    first_seen = db.lookups[VIN]["first_seen"]
+    load.run(CARS[:1], STORES, db, api(), workers=1, skip_fresh_hours=0, log=lambda s: None)
+    assert db.lookups[sold]["in_inventory"]                        # a --limit run doesn't judge inventory
+    db.calls.clear()
+    stats = load.run(CARS[:1], STORES, db, api(), workers=1, skip_fresh_hours=0, track_inventory=True, log=lambda s: None)
+    assert stats["left_inventory"] == 1 and db.calls == [VIN]     # the sold VIN isn't rechecked
+    assert set(db.lookups) == {VIN, sold} and sold in db.rows      # ... and nothing is deleted
+    assert not db.lookups[sold]["in_inventory"] and db.lookups[VIN]["in_inventory"]
+    assert db.lookups[VIN]["first_seen"] == first_seen
+    load.run(CARS, STORES, db, api(), workers=1, track_inventory=True, log=lambda s: None)
+    assert db.lookups[sold]["in_inventory"]                        # back in stock
 
 
 def test_failed_write_fails_the_vin_not_the_run():
@@ -224,7 +241,8 @@ def _ddl_columns(table: str) -> list[str]:
 
 
 @pytest.mark.parametrize("table,cols", [
-    ("src_mykaarma__vin_lookups", extract.LOOKUP_COLS), ("src_mykaarma__inspections", extract.INSPECTION_COLS),
+    ("src_mykaarma__vin_lookups", extract.LOOKUP_COLS + extract.INVENTORY_COLS),
+    ("src_mykaarma__inspections", extract.INSPECTION_COLS),
     ("src_mykaarma__recommendations", extract.RECOMMENDATION_COLS), ("src_mykaarma__inspection_associates", extract.ASSOCIATE_COLS)])
 def test_ddl_matches_inserted_columns(table, cols):
     assert _ddl_columns(table) == list(cols)

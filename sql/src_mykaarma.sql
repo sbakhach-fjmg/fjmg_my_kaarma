@@ -1,6 +1,7 @@
 -- One-time setup (re-runnable): myKaarma recommended work for used inventory. SQL Server 2014 compatible.
 -- Run in SSMS against the database that holds Current_Inventory. `uv run mykaarma load` fills the tables.
--- Current state only: each load replaces a VIN's rows; VINs that leave used inventory are pruned on a full run.
+-- Each load replaces a VIN's inspection rows (myKaarma returns all of a VIN's inspections, so past ROs stay).
+-- VINs that leave used inventory are kept with in_inventory = 0 and their last known state.
 -- Customer identifiers are never stored; employee identifiers are (inspection_associates, approver/last_updated_by).
 
 if object_id('dbo.src_mykaarma__vin_lookups', 'U') is null
@@ -10,8 +11,18 @@ create table dbo.src_mykaarma__vin_lookups (
 	checked_at datetime2(0) not null,              -- UTC
 	departments_checked smallint, departments_failed smallint,
 	inspections_found int,                         -- from the last error-free check
-	error nvarchar(400)                            -- null = last check succeeded
+	error nvarchar(400),                           -- null = last check succeeded
+	in_inventory bit not null default 1,           -- 0 = left used inventory; kept, no longer rechecked
+	first_seen datetime2(0),                       -- UTC, first check
+	last_seen datetime2(0)                         -- UTC, last full run that found it in used inventory
 );
+-- add the inventory columns to tables created before history was kept (backfilled in the next batch)
+if col_length('dbo.src_mykaarma__vin_lookups', 'in_inventory') is null
+	alter table dbo.src_mykaarma__vin_lookups add in_inventory bit not null default 1;
+if col_length('dbo.src_mykaarma__vin_lookups', 'first_seen') is null
+	alter table dbo.src_mykaarma__vin_lookups add first_seen datetime2(0);
+if col_length('dbo.src_mykaarma__vin_lookups', 'last_seen') is null
+	alter table dbo.src_mykaarma__vin_lookups add last_seen datetime2(0);
 
 if object_id('dbo.src_mykaarma__inspections', 'U') is null
 create table dbo.src_mykaarma__inspections (
@@ -68,11 +79,15 @@ create table dbo.src_mykaarma__inspection_associates (
 );
 go
 
+update dbo.src_mykaarma__vin_lookups
+set first_seen = isnull(first_seen, checked_at), last_seen = isnull(last_seen, checked_at)
+where first_seen is null or last_seen is null;
+
 if object_id('dbo.vw_mykaarma__vin_recommendation_summary', 'V') is not null
 	drop view dbo.vw_mykaarma__vin_recommendation_summary;
 go
 
--- One row per checked VIN; money and severity from its latest inspection that has recommendations (an empty
+-- One row per VIN ever checked (filter in_inventory = 1 for current stock); money and severity from its latest inspection that has recommendations (an empty
 -- newer inspection would otherwise hide real work), else its latest inspection. Amounts are line-item sums
 -- (unpriced lines count as 0 and are counted in unpriced_count); mk_* are myKaarma's totals for comparison.
 create view dbo.vw_mykaarma__vin_recommendation_summary as
@@ -110,7 +125,7 @@ with rec as (
 	group by mpi_uuid
 )
 select
-	v.vin, v.stock_no, v.dealer_code, v.checked_at, v.error,
+	v.vin, v.stock_no, v.dealer_code, v.in_inventory, v.first_seen, v.last_seen, v.checked_at, v.error,
 	isnull(l.inspections_all_time, 0) as inspections_all_time, l.last_inspection_date,
 	l.store, l.order_number, l.order_date, a.advisor_name,
 	isnull(r.rec_count, 0) as rec_count, isnull(r.unpriced_count, 0) as unpriced_count,

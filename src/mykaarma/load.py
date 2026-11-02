@@ -18,7 +18,7 @@ from mykaarma.client import ApiError, MyKaarma
 class Sink(Protocol):
     def fresh_vins(self, hours: float, now: datetime) -> set[str]: ...
     def replace_vin(self, lookup: dict, inspections: list[dict], recs: list[dict], associates: list[dict]) -> None: ...
-    def prune(self, keep_vins: list[str]) -> int: ...
+    def mark_inventory(self, in_stock: list[str], now: datetime) -> int: ...
 
 
 @dataclass
@@ -71,14 +71,16 @@ def _failed(car: dict, departments_checked: int, error: str) -> VinResult:
 
 
 def run(cars: list[dict], stores: dict[str, dict], sink: Sink, make_client: Callable[[], MyKaarma], *,
-        workers: int = 6, skip_fresh_hours: float = 20, prune: bool = False,
+        workers: int = 6, skip_fresh_hours: float = 20, track_inventory: bool = False,
         log: Callable[[str], None] = print, every: int = 100) -> dict:
     """Each VIN is checked only at its current store's Service department (stores: dealer_code -> department).
-    Returns counts: checked, skipped, errors, inspections, recommendations, pruned."""
+    track_inventory (full runs only): `cars` is all of used inventory, so VINs not in it are flagged as gone.
+    Returns counts: checked, skipped, errors, inspections, recommendations, left_inventory."""
     all_vins = [c["vin"] for c in cars]
     fresh = sink.fresh_vins(skip_fresh_hours, utcnow()) if skip_fresh_hours > 0 else set()
     todo = [c for c in cars if c["vin"] not in fresh]
-    stats = {"checked": 0, "skipped": len(cars) - len(todo), "errors": 0, "inspections": 0, "recommendations": 0, "pruned": 0}
+    stats = {"checked": 0, "skipped": len(cars) - len(todo), "errors": 0, "inspections": 0, "recommendations": 0,
+             "left_inventory": 0}
     log(f"{len(cars)} VINs, {stats['skipped']} checked recently (skipped), {len(todo)} to check "
         f"with {workers} workers")
 
@@ -121,7 +123,7 @@ def run(cars: list[dict], stores: dict[str, dict], sink: Sink, make_client: Call
     finally:
         for c in clients:
             c.close()
-    if prune:
-        stats["pruned"] = sink.prune(all_vins)
-        log(f"pruned {stats['pruned']} VIN(s) no longer in used inventory")
+    if track_inventory:
+        stats["left_inventory"] = sink.mark_inventory(all_vins, utcnow())
+        log(f"{stats['left_inventory']} VIN(s) left used inventory since the last full run (kept, in_inventory = 0)")
     return stats

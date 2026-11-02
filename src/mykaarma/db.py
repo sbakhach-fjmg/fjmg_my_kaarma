@@ -7,7 +7,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from mykaarma import config
-from mykaarma.extract import ASSOCIATE_COLS, INSPECTION_COLS, LOOKUP_COLS, RECOMMENDATION_COLS
+from mykaarma.extract import ASSOCIATE_COLS, INSPECTION_COLS, INVENTORY_COLS, LOOKUP_COLS, RECOMMENDATION_COLS
 
 SQL_DIR = config.ROOT / "sql"
 T_LOOKUPS = "dbo.src_mykaarma__vin_lookups"
@@ -15,7 +15,7 @@ T_INSPECTIONS = "dbo.src_mykaarma__inspections"
 T_RECS = "dbo.src_mykaarma__recommendations"
 T_ASSOC = "dbo.src_mykaarma__inspection_associates"
 V_SUMMARY = "dbo.vw_mykaarma__vin_recommendation_summary"
-TABLES = {T_LOOKUPS: LOOKUP_COLS, T_INSPECTIONS: INSPECTION_COLS, T_RECS: RECOMMENDATION_COLS, T_ASSOC: ASSOCIATE_COLS}
+TABLES = {T_LOOKUPS: LOOKUP_COLS + INVENTORY_COLS, T_INSPECTIONS: INSPECTION_COLS, T_RECS: RECOMMENDATION_COLS, T_ASSOC: ASSOCIATE_COLS}
 
 
 def _insert(table: str, cols: tuple[str, ...]) -> str:
@@ -37,8 +37,10 @@ class Mssql:
 
     def ensure_tables(self) -> None:
         missing = [name for name in [*TABLES, V_SUMMARY] if self._rows("select object_id(?)", (name,))[0][0] is None]
+        missing += [f"{t}.{c}" for t, cols in TABLES.items() if t not in missing
+                    for c in cols if self._rows("select col_length(?, ?)", (t, c))[0][0] is None]
         if missing:
-            raise RuntimeError(f"missing {', '.join(missing)}: run sql/src_mykaarma.sql once against this database")
+            raise RuntimeError(f"missing {', '.join(missing)}: run sql/src_mykaarma.sql against this database")
 
     def inventory_vins(self) -> list[dict]:
         """[{vin, stock_no, dealer_code}] for every used VIN in stock."""
@@ -50,26 +52,28 @@ class Mssql:
         return {r[0] for r in self._rows(f"select vin from {T_LOOKUPS} where error is null and checked_at >= ?",
                                          (now - timedelta(hours=hours),))}
 
+    def _upsert_lookup(self, cur, lookup: dict, cols: tuple[str, ...]) -> None:
+        """Update `cols` on the VIN's lookup row, or insert it seen now. first_seen is never overwritten."""
+        cur.execute(f"update {T_LOOKUPS} set {', '.join(f'[{c}] = ?' for c in cols)}, in_inventory = 1 where vin = ?",
+                    [lookup[c] for c in cols] + [lookup["vin"]])
+        if cur.rowcount == 0:
+            row = {**lookup, "in_inventory": 1, "first_seen": lookup["checked_at"], "last_seen": lookup["checked_at"]}
+            cur.execute(_insert(T_LOOKUPS, LOOKUP_COLS + INVENTORY_COLS), [row[c] for c in LOOKUP_COLS + INVENTORY_COLS])
+
     def replace_vin(self, lookup: dict, inspections: list[dict], recs: list[dict], associates: list[dict]) -> None:
-        """One transaction per VIN. Success replaces all its rows; an error only updates the lookup, so the
+        """One transaction per VIN. Success replaces its inspection rows; an error only updates the lookup, so the
         previous inspections stay and the next run retries the VIN."""
         cur = self.con.cursor()
         vin = lookup["vin"]
         try:
             if lookup["error"]:
-                cur.execute(f"update {T_LOOKUPS} set checked_at = ?, departments_checked = ?, departments_failed = ?, "
-                            f"error = ?, stock_no = ?, dealer_code = ? where vin = ?",
-                            (lookup["checked_at"], lookup["departments_checked"], lookup["departments_failed"],
-                             lookup["error"], lookup["stock_no"], lookup["dealer_code"], vin))
-                if cur.rowcount == 0:
-                    cur.execute(_insert(T_LOOKUPS, LOOKUP_COLS), [lookup[c] for c in LOOKUP_COLS])
+                self._upsert_lookup(cur, lookup, tuple(c for c in LOOKUP_COLS if c not in ("vin", "inspections_found")))
             else:
                 sub = f"select mpi_uuid from {T_INSPECTIONS} where vin = ?"
                 cur.execute(f"delete from {T_ASSOC} where mpi_uuid in ({sub})", (vin,))
                 cur.execute(f"delete from {T_RECS} where vin = ?", (vin,))
                 cur.execute(f"delete from {T_INSPECTIONS} where vin = ?", (vin,))
-                cur.execute(f"delete from {T_LOOKUPS} where vin = ?", (vin,))
-                cur.execute(_insert(T_LOOKUPS, LOOKUP_COLS), [lookup[c] for c in LOOKUP_COLS])
+                self._upsert_lookup(cur, lookup, tuple(c for c in LOOKUP_COLS if c != "vin"))
                 for table, cols, rows in ((T_INSPECTIONS, INSPECTION_COLS, inspections),
                                           (T_RECS, RECOMMENDATION_COLS, recs), (T_ASSOC, ASSOCIATE_COLS, associates)):
                     if rows:
@@ -79,21 +83,18 @@ class Mssql:
             self.con.rollback()
             raise
 
-    def prune(self, keep_vins: list[str]) -> int:
-        """Delete every VIN no longer in used inventory. Returns how many VINs were removed."""
+    def mark_inventory(self, in_stock: list[str], now: datetime) -> int:
+        """Stamp last_seen on VINs in used inventory and flag the rest in_inventory = 0 (their rows are kept).
+        Returns how many VINs left inventory since the last full run."""
         cur = self.con.cursor()
         try:
-            cur.execute("create table #keep (vin char(17) primary key)")
-            for i in range(0, len(keep_vins), 500):
-                cur.executemany("insert into #keep (vin) values (?)", [[v] for v in keep_vins[i:i + 500]])
-            gone = f"select vin from {T_LOOKUPS} where vin not in (select vin from #keep)"
-            cur.execute(f"select count(*) from ({gone}) g")
-            n = cur.fetchone()[0]
-            cur.execute(f"delete from {T_ASSOC} where mpi_uuid in (select mpi_uuid from {T_INSPECTIONS} where vin in ({gone}))")
-            cur.execute(f"delete from {T_RECS} where vin in ({gone})")
-            cur.execute(f"delete from {T_INSPECTIONS} where vin in ({gone})")
-            cur.execute(f"delete from {T_LOOKUPS} where vin in ({gone})")
-            cur.execute("drop table #keep")
+            cur.execute("create table #stock (vin char(17) primary key)")
+            for i in range(0, len(in_stock), 500):
+                cur.executemany("insert into #stock (vin) values (?)", [[v] for v in in_stock[i:i + 500]])
+            cur.execute(f"update {T_LOOKUPS} set in_inventory = 1, last_seen = ? where vin in (select vin from #stock)", (now,))
+            cur.execute(f"update {T_LOOKUPS} set in_inventory = 0 where in_inventory = 1 and vin not in (select vin from #stock)")
+            n = cur.rowcount
+            cur.execute("drop table #stock")
             self.con.commit()
             return n
         except Exception:

@@ -17,6 +17,7 @@ RECOMMENDATION_COLS = ("recommendation_uuid", "mpi_uuid", "vin", "section", "che
 ASSOCIATE_COLS = ("mpi_uuid", "role", "associate_uuid", "associate_name")
 LOOKUP_COLS = ("vin", "stock_no", "dealer_code", "checked_at", "departments_checked", "departments_failed",
                "inspections_found", "error")
+INVENTORY_COLS = ("in_inventory", "first_seen", "last_seen")   # vin_lookups columns the database layer maintains
 
 
 def severity(check: dict) -> str:
