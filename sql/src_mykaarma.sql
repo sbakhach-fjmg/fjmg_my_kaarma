@@ -36,7 +36,7 @@ create table dbo.src_mykaarma__recommendations (
 	recommendation_uuid varchar(64) not null primary key,
 	mpi_uuid varchar(64) not null,
 	vin char(17) not null,
-	section nvarchar(200), check_name nvarchar(400), description nvarchar(2000),
+	section nvarchar(400), check_name nvarchar(1000), description nvarchar(4000),   -- store-written text; check_name seen at 548
 	severity varchar(6), severity_rank tinyint,    -- red 3, yellow 2, green 1, none 0 (worst colour on the check)
 	status varchar(30), approval_state varchar(30),
 	decision varchar(10) not null,                 -- approved / declined / pending
@@ -46,6 +46,13 @@ create table dbo.src_mykaarma__recommendations (
 	rec_created_on datetime2(0), rec_updated_on datetime2(0),
 	loaded_at datetime2(0) not null
 );
+-- widen tables created before these limits were raised (col_length is in bytes: 2 per nvarchar character)
+if col_length('dbo.src_mykaarma__recommendations', 'section') < 800
+	alter table dbo.src_mykaarma__recommendations alter column section nvarchar(400);
+if col_length('dbo.src_mykaarma__recommendations', 'check_name') < 2000
+	alter table dbo.src_mykaarma__recommendations alter column check_name nvarchar(1000);
+if col_length('dbo.src_mykaarma__recommendations', 'description') < 8000
+	alter table dbo.src_mykaarma__recommendations alter column description nvarchar(4000);
 if not exists (select 1 from sys.indexes where name = 'ix_src_mykaarma__recommendations_vin')
 create index ix_src_mykaarma__recommendations_vin on dbo.src_mykaarma__recommendations (vin);
 if not exists (select 1 from sys.indexes where name = 'ix_src_mykaarma__recommendations_mpi')

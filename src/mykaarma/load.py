@@ -104,7 +104,12 @@ def run(cars: list[dict], stores: dict[str, dict], sink: Sink, make_client: Call
         with ThreadPoolExecutor(max_workers=workers) as pool:
             for fut in as_completed([pool.submit(work, c) for c in todo]):
                 res = fut.result()
-                sink.replace_vin(res.lookup, res.inspections, res.recs, res.associates)
+                try:
+                    sink.replace_vin(res.lookup, res.inspections, res.recs, res.associates)
+                except Exception as e:   # a row the tables can't hold fails this VIN; a dead connection still stops the run
+                    res = _failed(res.lookup, res.lookup["departments_checked"],
+                                  f"database write failed: {type(e).__name__}: {e}"[:400])
+                    sink.replace_vin(res.lookup, [], [], [])
                 stats["checked"] += 1
                 stats["errors"] += bool(res.lookup["error"])
                 stats["inspections"] += len(res.inspections)

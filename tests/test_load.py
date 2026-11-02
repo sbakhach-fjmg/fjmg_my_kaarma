@@ -177,6 +177,20 @@ def test_prune_only_on_request():
     assert list(db.lookups) == [VIN]
 
 
+def test_failed_write_fails_the_vin_not_the_run():
+    class TooLong(FakeDb):
+        def replace_vin(self, lookup, inspections, recs, associates):
+            if recs:
+                raise ValueError("String or binary data would be truncated")
+            super().replace_vin(lookup, inspections, recs, associates)
+
+    db = TooLong()
+    stats = load.run(CARS, STORES, db, api(), workers=2, log=lambda s: None)
+    assert stats["checked"] == 2 and stats["errors"] == 1 and stats["recommendations"] == 0
+    assert db.lookups[VIN]["error"] == "database write failed: ValueError: String or binary data would be truncated"
+    assert db.lookups["1HGCM82633A004352"]["error"] is None
+
+
 def test_unexpected_payload_fails_the_vin_not_the_run(monkeypatch):
     db = FakeDb()
     monkeypatch.setattr(extract, "rows", lambda *a: (_ for _ in ()).throw(KeyError("x")))
