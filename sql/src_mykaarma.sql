@@ -19,13 +19,15 @@ create table dbo.src_mykaarma__inspections (
 	vin char(17) not null,
 	store nvarchar(100), department_uuid char(64),
 	order_uuid varchar(64), order_number varchar(20), order_date date, order_status varchar(4),
-	mpi_status varchar(30),
+	mpi_status varchar(100),                       -- seen up to 52 chars
 	mk_recommended_total decimal(12,2), mk_approved_total decimal(12,2),   -- myKaarma's own figures, for reconciliation
 	mk_rec_count int, mk_approve_count int, mk_decline_count int,
 	mpi_created_on datetime2(0), mpi_updated_on datetime2(0),             -- UTC
 	loaded_at datetime2(0) not null,
 	raw nvarchar(max)                              -- get-MPI detail JSON minus customerIdentifiers; storage only on 2014
 );
+if col_length('dbo.src_mykaarma__inspections', 'mpi_status') < 100       -- widen tables created before this fix
+	alter table dbo.src_mykaarma__inspections alter column mpi_status varchar(100);
 if not exists (select 1 from sys.indexes where name = 'ix_src_mykaarma__inspections_vin')
 create index ix_src_mykaarma__inspections_vin on dbo.src_mykaarma__inspections (vin, order_date desc);
 
