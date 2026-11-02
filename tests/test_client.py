@@ -21,15 +21,33 @@ CONFIGS = {
     }],
 }
 
-MPIS = {
+# Shapes as seen live (Nov 2026): the VIN filter returns summaries with mpiSections null; line items need the detail call.
+SUMMARIES = {
     "statusCode": 200,
-    "mpisForOrdersMap": {"order-1": [{"orderNumber": "R123", "mpiSections": [{"name": "Tires", "checks": [
-        {"name": "Front tires", "description": "Tread depth", "recommendations": [
-            {"description": "Replace front tires", "approvalState": "DECLINED", "status": "OPEN",
-             "amount": {"amount": 612.5, "unit": "USD"}, "opCodes": ["TIRE2"]}]},
-        {"name": "Rear tires", "recommendations": []},
-    ]}]}]},
+    "mpisForOrdersMap": {"order-1": [{
+        "uuid": "mpi-1", "mpiSections": None, "recommendedTotal": 612.5, "approvedTotal": 0.0,
+        "orderIdentifiers": {"orderUUID": "order-1", "orderNumber": "R123", "orderDate": "2026-10-22", "orderStatus": "C"},
+    }]},
 }
+DETAIL = {
+    "statusCode": 200,
+    "multiPointInsepction": {"uuid": "mpi-1", "mpiSections": [{"name": "Tires", "checks": [
+        {"name": "Front tires", "laborOpCode": "TIRE2",
+         "fieldList": [{"state": "green"}, {"state": "red"}, {"state": "gray"}],
+         "recommendations": [
+             {"description": None, "status": "incomplete", "approvalState": None, "amount": {"amount": 612.5, "unit": "USD"}},
+             {"description": None, "status": None, "amount": None}]},   # empty template slot: dropped
+        {"name": "Rear tires", "fieldList": [{"state": "gray"}], "recommendations": [{"status": None}]},
+    ]}]},
+}
+
+
+def mpi_api(req):
+    if req.url.path.endswith("/multiPointInspections"):
+        return httpx.Response(200, json=SUMMARIES)
+    if req.url.path.endswith("/order/order-1/multiPointInspection/mpi-1"):
+        return httpx.Response(200, json=DETAIL)
+    return httpx.Response(404)
 
 
 def mk(handler) -> MyKaarma:
@@ -50,19 +68,35 @@ def test_sends_basic_auth_and_parses_departments():
     assert rows[0]["business"] == "FJ Newport" and MPI_SCOPE in rows[0]["scopes"]
 
 
-def test_recommendations_flattened_and_vin_in_body_not_url():
+def test_recommendations_from_summary_then_detail_dropping_empty_slots():
+    calls = []
+
     def handler(req):
-        assert req.url.path == "/scprocessor/mpi/v1/dealerDepartment/dept-svc/multiPointInspections"
+        calls.append((req.method, req.url.path))
         assert "WDD" not in str(req.url)
-        assert b'"vin"' in req.content
-        return httpx.Response(200, json=MPIS)
+        return mpi_api(req)
 
     recs = mk(handler).recommended_work("WDDZF4JB1HA123456", "dept-svc")
+    assert calls == [("POST", "/scprocessor/mpi/v1/dealerDepartment/dept-svc/multiPointInspections"),
+                     ("GET", "/scprocessor/mpi/v1/dealerDepartment/dept-svc/order/order-1/multiPointInspection/mpi-1")]
     assert recs == [{
-        "order_uuid": "order-1", "order_number": "R123", "section": "Tires", "check": "Front tires",
-        "description": "Replace front tires", "approval_state": "DECLINED", "status": "OPEN", "work_status": "",
-        "amount": 612.5, "op_codes": ["TIRE2"], "created_on": "",
+        "order_uuid": "order-1", "order_number": "R123", "order_date": "2026-10-22", "order_status": "C",
+        "recommended_total": 612.5, "approved_total": 0.0, "section": "Tires", "check": "Front tires",
+        "description": "", "severity": "red", "status": "incomplete", "approval_state": "",
+        "amount": 612.5, "op_code": "TIRE2",
     }]
+
+
+def test_vin_goes_in_the_body():
+    bodies = []
+
+    def handler(req):
+        if req.method == "POST":
+            bodies.append(req.content)
+        return mpi_api(req)
+
+    mk(handler).inspections("WDDZF4JB1HA123456", "dept-svc")
+    assert bodies == [b'{"vin":"WDDZF4JB1HA123456"}']
 
 
 @pytest.mark.parametrize("status", [401, 403, 500])
@@ -103,10 +137,10 @@ def test_fan_out_skips_unscoped_and_survives_a_failing_department():
     def handler(req):
         uuid = req.url.path.split("/")[5]
         called.append(uuid)
-        return httpx.Response(500) if uuid == "broken" else httpx.Response(200, json=MPIS)
+        return httpx.Response(500) if uuid == "broken" else mpi_api(req)
 
     results = cli.fetch_all(mk(handler), "WDDZF4JB1HA123456", depts)
-    assert called == ["ok", "broken"]
+    assert called == ["ok", "ok", "broken"]
     assert len(results[0][1]) == 1
     assert results[1][1] is None and "skipped" in results[1][2]
     assert results[2][1] is None and "500" in results[2][2]

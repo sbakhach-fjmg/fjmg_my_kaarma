@@ -29,6 +29,10 @@ def cmd_check(args) -> int:
     return 0
 
 
+def _usd(v) -> str:
+    return f"${v:,.2f}" if isinstance(v, (int, float)) else "-"
+
+
 def _pick(depts: list[dict], want: str | None, all_depts: bool = False) -> list[dict]:
     """Default: each store's Service department, where inspections live. --dept narrows, --all widens."""
     if not want:
@@ -71,13 +75,17 @@ def cmd_recommendations(args) -> int:
             continue
         if not recs:
             print("  no recommendations")
+        order = None
         for r in recs:
             total += 1
-            amt = f"  ${r['amount']:,.2f}" if isinstance(r["amount"], (int, float)) else ""
-            ops = f"  [{', '.join(map(str, r['op_codes']))}]" if r["op_codes"] else ""
-            print(f"  - {r['check']}: {r['description']}{amt}{ops}\n"
-                  f"    approval={r['approval_state'] or '-'} status={r['status'] or '-'} work={r['work_status'] or '-'}"
-                  f" RO={r['order_number'] or r['order_uuid']}")
+            if r["order_uuid"] != order:
+                order = r["order_uuid"]
+                print(f"  RO {r['order_number'] or order}  {r['order_date']}  ({r['order_status']})"
+                      f"  recommended {_usd(r['recommended_total'])}, approved {_usd(r['approved_total'])}")
+            label = r["check"] + (f": {r['description']}" if r["description"] else "")
+            print(f"    - [{r['severity'] or '-':<6}] {label}  {_usd(r['amount'])}"
+                  f"  {r['status']}{'/' + r['approval_state'] if r['approval_state'] not in ('', r['status']) else ''}"
+                  f"{'  op ' + r['op_code'] if r['op_code'] else ''}")
     print(f"\n{total} recommendation(s) for {vin}")
     return 0
 
