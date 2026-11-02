@@ -1,6 +1,6 @@
 # mykaarma
 
-Small CLI for the myKaarma API (Basic auth). It lists the departments your credentials can reach, then pulls recommended work (multipoint-inspection recommendations) for a VIN across those departments.
+Small CLI for the myKaarma API (Basic auth). It lists the departments your credentials can reach, pulls recommended work (multipoint-inspection recommendations) for a VIN, and loads that work for every used car in stock into SQL Server, so you can see per VIN how much is recommended, approved, declined or pending, and how severe it is.
 
 ## Setup
 
@@ -34,21 +34,47 @@ uv run mykaarma recommendations WDDZF4JB1HA123456 --dept newport
 Results land in `dbo.src_mykaarma__*` tables in the database that holds `Current_Inventory`. The stakeholder's view is `dbo.vw_mykaarma__vin_recommendation_summary`: one row per VIN, with the recommended, approved, declined and pending amounts and the severity counts from the VIN's latest inspection that has recommendations (or its latest inspection if none do). `last_inspection_date` shows when a newer, empty inspection exists.
 
 1. Add `MSSQL_CONNECTION` to `.env`, using the template in `.env.example` (Windows integrated auth, no password).
-2. Run `sql/src_mykaarma.sql` once in SSMS. It's re-runnable, and the loader never creates tables.
+2. Run `sql/src_mykaarma.sql` once in SSMS. It's re-runnable (it also widens columns on tables created by an older version), and the loader never creates tables.
 3. Run the loader:
 
 ```
 uv run mykaarma load --limit 25      # first N used VINs; nothing is pruned
 uv run mykaarma load                 # all used inventory; prunes VINs that left inventory
+uv run mykaarma load --workers 8     # parallel API workers (default 6)
+uv run mykaarma load --skip-fresh 0  # recheck everything (default skips VINs checked in the last 20 hours)
 ```
 
-Each VIN is checked only at its current store's Service department, using `stores.json` (inventory `StoreID` → myKaarma department, committed), and is committed in its own transaction. A VIN at a store missing from `stores.json` is recorded with an error and no API calls. A department error keeps the VIN's previous rows and records `error`, and the next run retries it. VINs checked without error in the last 20 hours are skipped (`--skip-fresh 0` rechecks everything), so a stopped run picks up where it left off. Customer identifiers are never stored. Employee identifiers are.
+A full run covers about 1,600 VINs in under 5 minutes.
+
+**Which VINs.** `sql/current_inventory_used.sql` returns every used car in stock in `Current_Inventory`: `[Veh Status] = 'P'`, `[New/Used] = 'U'`, a 17-character VIN, and not at FRMBN, FRPOR, AUDFR or WCPOR. A VIN with two stock records keeps the most recently received one.
+
+**Which store.** Each VIN is checked only at its current store's Service department. `stores.json` (committed) maps the inventory `StoreID` to that department's myKaarma UUID. To add a store, run `uv run mykaarma check` to find its Service department UUID and add an entry. A VIN at a store missing from `stores.json` is recorded with an error and no API calls, and the loader lists unmapped store codes when it starts.
+
+**Failures and resuming.** Each VIN is written in its own transaction. If a department call fails (after 3 retries on 429, 5xx and timeouts) or the database rejects a row, the VIN's previous rows stay, its `error` column is set, and the next run retries it. A stopped run picks up where it left off, because VINs checked without error recently are skipped. The run exits with status 1 if any VIN errored.
+
+**Tables** (current state only; each load replaces a VIN's rows):
+
+| Table | One row per |
+|---|---|
+| `src_mykaarma__vin_lookups` | VIN checked: when, at which store, how many inspections, and `error` (null = OK) |
+| `src_mykaarma__inspections` | inspection (one per RO), with myKaarma's own totals (`mk_*`) and the raw JSON minus customer identifiers |
+| `src_mykaarma__recommendations` | recommended line: check, description, severity, status, decision, amount, op code |
+| `src_mykaarma__inspection_associates` | employee on an inspection: advisor, technician or assignee |
+
+**How the summary decides things.**
+- *Decision:* `approvalState` first, then `status`. Anything starting `approv` is approved, `declin` is declined, and everything else is pending (`incomplete`, `complete`, `requested`, `not needed`).
+- *Severity:* the worst colour on the line's check (red > yellow > green).
+- *Amounts:* sums of the line items. Unpriced lines count as 0 and are counted in `unpriced_count`. myKaarma's `mk_recommended_total` and `mk_approved_total` are kept for comparison, but don't always match the lines. Approved in particular often includes other work on the RO.
+- *Pending on old ROs* usually means nobody recorded a decision, not work still waiting. Use `order_date` to tell.
+
+Customer identifiers are never stored. Employee identifiers are.
 
 ## How credentials are kept out of output
 
 - They go straight into `httpx.BasicAuth`. Nothing builds, stores or prints the header.
 - Errors report the method, path and status only, never the request, headers or response body.
 - The VIN goes in the request body, and the credentials are never in a URL or a CLI argument.
+- The loader's progress lines carry counts only. Stored errors carry store names, HTTP status codes or the database driver's message, and never credentials.
 - `uv run pytest` checks that the password, username and Base64 token never show up in errors, `repr`, logs or CLI output.
 
 ## API references
