@@ -51,7 +51,7 @@ def mpi_api(req):
 
 
 def mk(handler) -> MyKaarma:
-    return MyKaarma(USER, PW, transport=httpx.MockTransport(handler))
+    return MyKaarma(USER, PW, transport=httpx.MockTransport(handler), sleep=lambda s: None)
 
 
 def test_sends_basic_auth_and_parses_departments():
@@ -140,7 +140,7 @@ def test_fan_out_skips_unscoped_and_survives_a_failing_department():
         return httpx.Response(500) if uuid == "broken" else mpi_api(req)
 
     results = cli.fetch_all(mk(handler), "WDDZF4JB1HA123456", depts)
-    assert called == ["ok", "ok", "broken"]
+    assert called == ["ok", "ok", "broken", "broken", "broken"]   # 500 retried 3 times
     assert len(results[0][1]) == 1
     assert results[1][1] is None and "skipped" in results[1][2]
     assert results[2][1] is None and "500" in results[2][2]

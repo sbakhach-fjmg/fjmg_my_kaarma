@@ -29,6 +29,21 @@ uv run mykaarma recommendations WDDZF4JB1HA123456 --dept newport
 
 `recommendations` queries each store's Service department from `departments.json` (12 today). `--all` queries all 58, and `--dept` narrows to matching departments. It skips departments without the `multipoint.inspection.fetch` scope and reports a failure in one department without stopping the others.
 
+## Load used inventory into SQL Server
+
+Results land in `dbo.src_mykaarma__*` tables in the database that holds `Current_Inventory`. The stakeholder's view is `dbo.vw_mykaarma__vin_recommendation_summary`: one row per VIN, with the recommended, approved, declined and pending amounts and the severity counts from the VIN's latest inspection.
+
+1. Add `MSSQL_CONNECTION` to `.env`, using the template in `.env.example` (Windows integrated auth, no password).
+2. Run `sql/src_mykaarma.sql` once in SSMS. It's re-runnable, and the loader never creates tables.
+3. Run the loader:
+
+```
+uv run mykaarma load --limit 25      # first N used VINs; nothing is pruned
+uv run mykaarma load                 # all used inventory; prunes VINs that left inventory
+```
+
+Each VIN is checked against the 12 Service departments and committed in its own transaction. A department error keeps the VIN's previous rows and records `error`, and the next run retries it. VINs checked without error in the last 20 hours are skipped (`--skip-fresh 0` rechecks everything), so a stopped run picks up where it left off. Customer identifiers are never stored. Employee identifiers are.
+
 ## How credentials are kept out of output
 
 - They go straight into `httpx.BasicAuth`. Nothing builds, stores or prints the header.

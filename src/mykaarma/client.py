@@ -4,7 +4,12 @@ Credentials go straight into httpx.BasicAuth and are never stored, formatted or 
 Errors carry the method, path and status only: never the request, its headers or the response body.
 """
 from __future__ import annotations
+import time
+from datetime import datetime
+
 import httpx
+
+from mykaarma import extract
 
 MPI_SCOPE = "multipoint.inspection.fetch"
 
@@ -21,26 +26,14 @@ def _scope_name(s) -> str:
     return s if isinstance(s, str) else str(s.get("scope") or s.get("name") or "")
 
 
-def _money(v):
-    """Amounts come back as plain numbers or as {amount, unit} objects."""
-    return v.get("amount") if isinstance(v, dict) else v
-
-
-_SEVERITY = {"red": 3, "yellow": 2, "green": 1}
-
-
-def _severity(check: dict) -> str:
-    """Worst colour among the check's inspection fields (red > yellow > green); '' if none."""
-    states = [f.get("state") for f in check.get("fieldList") or [] if f.get("state") in _SEVERITY]
-    return max(states, key=_SEVERITY.get) if states else ""
-
-
 class MyKaarma:
     def __init__(self, username: str, password: str, base_url: str = "https://api.mykaarma.com",
-                 timeout: float = 30, transport: httpx.BaseTransport | None = None):
+                 timeout: float = 30, transport: httpx.BaseTransport | None = None, retries: int = 3,
+                 sleep=time.sleep):
         if not username or not password:
             raise ConfigError("MYKAARMA_USERNAME/MYKAARMA_PASSWORD not set in .env")
         self.base_url = base_url
+        self._retries, self._sleep = retries, sleep
         self._http = httpx.Client(base_url=base_url, auth=httpx.BasicAuth(username, password), timeout=timeout,
                                   transport=transport, headers={"accept": "application/json"})
 
@@ -57,16 +50,27 @@ class MyKaarma:
         self.close()
 
     def _request(self, method: str, path: str, **kw) -> dict:
-        try:
-            resp = self._http.request(method, path, **kw)
-        except httpx.HTTPError as e:
-            raise ApiError(f"{method} {path} failed: {type(e).__name__}") from None
-        if resp.status_code in (401, 403):
-            raise ApiError(f"myKaarma rejected the credentials ({resp.status_code}) for {path}; "
-                           "check MYKAARMA_USERNAME/MYKAARMA_PASSWORD and the scopes granted")
-        if resp.status_code >= 400:
-            raise ApiError(f"{method} {path} returned {resp.status_code}")
-        return resp.json()
+        """Retries 429, 5xx and transport errors with backoff (1s, 2s, 4s...); 401/403 and other 4xx fail at once."""
+        for attempt in range(self._retries):
+            last = attempt == self._retries - 1
+            try:
+                resp = self._http.request(method, path, **kw)
+            except httpx.HTTPError as e:
+                if last:
+                    raise ApiError(f"{method} {path} failed: {type(e).__name__}") from None
+                self._sleep(2 ** attempt)
+                continue
+            if resp.status_code in (401, 403):
+                raise ApiError(f"myKaarma rejected the credentials ({resp.status_code}) for {path}; "
+                               "check MYKAARMA_USERNAME/MYKAARMA_PASSWORD and the scopes granted")
+            if resp.status_code == 429 or resp.status_code >= 500:
+                if last:
+                    raise ApiError(f"{method} {path} returned {resp.status_code}")
+                self._sleep(2 ** attempt)
+                continue
+            if resp.status_code >= 400:
+                raise ApiError(f"{method} {path} returned {resp.status_code}")
+            return resp.json()
 
     def check_access(self) -> list[dict]:
         """One row per department the credentials can reach, with that department's enabled scopes."""
@@ -98,36 +102,26 @@ class MyKaarma:
                                     f"/multiPointInspection/{mpi_uuid}")
         return data.get("multiPointInsepction") or {}   # myKaarma's spelling
 
-    def recommended_work(self, vin: str, department_uuid: str) -> list[dict]:
-        """One row per real recommendation on every inspection for this VIN in one department.
-
-        Each check carries recommendation slots; empty template slots have no status and are dropped, which makes
-        the count match the summary's totalRecommendationCount. Recommendations rarely carry their own description,
-        so the label falls back to the check name, and the op code to the check's laborOpCode.
-        """
-        rows = []
+    def vin_inspections(self, vin: str, department_uuid: str) -> list[tuple[dict, dict]]:
+        """(summary, detail) for every inspection on this VIN in one department: one search, then one call each."""
+        out = []
         for summary in self.inspections(vin, department_uuid):
             order = summary.get("orderIdentifiers") or {}
-            mpi = self.inspection_detail(department_uuid, order.get("orderUUID", ""), summary.get("uuid", ""))
-            for section in mpi.get("mpiSections") or []:
-                for check in section.get("checks") or []:
-                    for rec in check.get("recommendations") or []:
-                        if not rec.get("status"):
-                            continue
-                        rows.append({
-                            "order_uuid": order.get("orderUUID", ""),
-                            "order_number": order.get("orderNumber", ""),
-                            "order_date": order.get("orderDate", ""),
-                            "order_status": order.get("orderStatus", ""),
-                            "recommended_total": summary.get("recommendedTotal"),
-                            "approved_total": summary.get("approvedTotal"),
-                            "section": section.get("name") or "",
-                            "check": check.get("name") or "",
-                            "description": rec.get("description") or "",
-                            "severity": _severity(check),
-                            "status": rec.get("status") or "",
-                            "approval_state": rec.get("approvalState") or "",
-                            "amount": _money(rec.get("amount")),
-                            "op_code": ", ".join(map(str, rec.get("opCodes") or [])) or str(check.get("laborOpCode") or ""),
-                        })
+            out.append((summary, self.inspection_detail(department_uuid, order.get("orderUUID", ""), summary.get("uuid", ""))))
+        return out
+
+    def recommended_work(self, vin: str, department_uuid: str) -> list[dict]:
+        """One row per real recommendation on every inspection for this VIN in one department (for the CLI)."""
+        rows = []
+        for summary, detail in self.vin_inspections(vin, department_uuid):
+            insp, recs, _ = extract.rows(vin, "", department_uuid, summary, detail, datetime.now())
+            for r in recs:
+                rows.append({
+                    "order_uuid": insp["order_uuid"] or "", "order_number": insp["order_number"] or "",
+                    "order_date": str(insp["order_date"] or ""), "order_status": insp["order_status"] or "",
+                    "recommended_total": insp["mk_recommended_total"], "approved_total": insp["mk_approved_total"],
+                    "section": r["section"] or "", "check": r["check_name"] or "", "description": r["description"] or "",
+                    "severity": r["severity"], "status": r["status"] or "", "approval_state": r["approval_state"] or "",
+                    "amount": r["amount"], "op_code": r["op_code"] or "",
+                })
         return rows

@@ -1,6 +1,7 @@
-"""mykaarma check [--save] | mykaarma recommendations VIN [--dept NAME_OR_UUID]"""
+"""mykaarma check [--save] | recommendations VIN [--dept NAME_OR_UUID] | load [--limit N] [--workers N] [--skip-fresh H]"""
 from __future__ import annotations
 import argparse
+import os
 import re
 import sys
 
@@ -90,6 +91,35 @@ def cmd_recommendations(args) -> int:
     return 0
 
 
+def cmd_load(args) -> int:
+    from mykaarma import load
+    from mykaarma.db import Mssql
+    conn = os.environ.get("MSSQL_CONNECTION", "")
+    if not conn:
+        raise ConfigError("MSSQL_CONNECTION not set in .env")
+    depts = load.service_departments(config.departments())
+    if not depts:
+        raise ConfigError("no Service departments with the inspection scope: run `mykaarma check --save` first")
+    _client().close()   # fail on missing credentials before touching the database
+    db = Mssql(conn)
+    try:
+        db.ensure_tables()
+        cars = db.inventory_vins()
+        bad = [c for c in cars if not VIN_RE.match(c["vin"] or "")]
+        cars = [c for c in cars if c not in bad]
+        if bad:
+            print(f"ignoring {len(bad)} inventory row(s) with an invalid VIN")
+        full = args.limit is None
+        if not full:
+            cars = cars[:args.limit]
+        stats = load.run(cars, depts, db, _client, workers=args.workers, skip_fresh_hours=args.skip_fresh, prune=full)
+    finally:
+        db.close()
+    print(f"done: {stats['checked']} checked, {stats['skipped']} skipped, {stats['errors']} with errors, "
+          f"{stats['inspections']} inspections, {stats['recommendations']} recommendations")
+    return 1 if stats["errors"] else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     config.load_env()
     p = argparse.ArgumentParser(prog="mykaarma")
@@ -102,10 +132,16 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--dept", help="limit to matching departments (UUID or part of 'store department')")
     r.add_argument("--all", action="store_true", help="query every saved department, not just Service")
     r.set_defaults(func=cmd_recommendations)
+    ld = sub.add_parser("load", help="check every used-inventory VIN and write results to SQL Server")
+    ld.add_argument("--limit", type=int, help="only the first N VINs (no pruning of VINs that left inventory)")
+    ld.add_argument("--workers", type=int, default=6, help="parallel API workers (default 6)")
+    ld.add_argument("--skip-fresh", type=float, default=20, metavar="HOURS",
+                    help="skip VINs checked without error in the last HOURS (default 20; 0 = recheck all)")
+    ld.set_defaults(func=cmd_load)
     args = p.parse_args(argv)
     try:
         return args.func(args)
-    except (ConfigError, ApiError) as e:
+    except (ConfigError, ApiError, RuntimeError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
