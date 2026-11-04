@@ -100,7 +100,7 @@ class FakeDb:
     def fresh_vins(self, hours, now):
         return {v for v, l in self.lookups.items() if l["error"] is None and l["checked_at"] >= now - timedelta(hours=hours)}
 
-    def replace_vin(self, lookup, inspections, recs, associates):
+    def replace_vin(self, lookup, inspections, recs, associates, in_stock=True):
         self.calls.append(lookup["vin"])
         seen = {"in_inventory": True, "first_seen": lookup["checked_at"], "last_seen": lookup["checked_at"]}
         old = self.lookups.get(lookup["vin"], seen)
@@ -109,7 +109,10 @@ class FakeDb:
         else:
             self.lookups[lookup["vin"]] = {**old, **lookup}
             self.rows[lookup["vin"]] = (inspections, recs, associates)
-        self.lookups[lookup["vin"]]["in_inventory"] = True
+        if in_stock:
+            self.lookups[lookup["vin"]]["in_inventory"] = True
+        elif old is seen:
+            self.lookups[lookup["vin"]]["in_inventory"] = False
 
     def mark_inventory(self, in_stock, now):
         gone = 0
@@ -196,7 +199,7 @@ def test_vins_that_leave_inventory_are_kept_and_flagged_not_rechecked():
 
 def test_failed_write_fails_the_vin_not_the_run():
     class TooLong(FakeDb):
-        def replace_vin(self, lookup, inspections, recs, associates):
+        def replace_vin(self, lookup, inspections, recs, associates, in_stock=True):
             if recs:
                 raise ValueError("String or binary data would be truncated")
             super().replace_vin(lookup, inspections, recs, associates)
@@ -255,3 +258,11 @@ def test_extracted_rows_have_exactly_the_table_columns():
     assert all(tuple(a) == extract.ASSOCIATE_COLS for a in assoc)
     lookup = load.check_vin(api()(), CARS[0], [STORES["NBMBN"]]).lookup
     assert tuple(lookup) == extract.LOOKUP_COLS
+
+
+def test_vins_outside_stock_are_loaded_without_being_marked_in_inventory():
+    db = FakeDb()
+    cars = [{**c, "in_stock": False} for c in CARS]
+    load.run(cars, STORES, db, api(), workers=1, log=lambda s: None)
+    assert all(not db.lookups[c["vin"]]["in_inventory"] for c in CARS)
+    assert set(db.rows) == {c["vin"] for c in CARS}

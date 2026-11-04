@@ -91,6 +91,18 @@ def cmd_recommendations(args) -> int:
     return 0
 
 
+def _vin_file(path: str) -> list[dict]:
+    """[{vin, stock_no, dealer_code, in_stock: False}] from a CSV with a header row: vin, dealer_code, optional stock_no.
+    For VINs outside current stock (e.g. a fj-internal-allocation snapshot): each is checked at the store given."""
+    import csv
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        rows = list(csv.DictReader(f))
+    if rows and not {"vin", "dealer_code"} <= set(rows[0]):
+        raise ConfigError(f"{path} needs a header row with vin and dealer_code columns")
+    return [{"vin": (r["vin"] or "").strip().upper(), "stock_no": (r.get("stock_no") or "").strip() or None,
+             "dealer_code": (r["dealer_code"] or "").strip().upper(), "in_stock": False} for r in rows]
+
+
 def cmd_load(args) -> int:
     from mykaarma import load
     from mykaarma.db import Mssql
@@ -102,12 +114,12 @@ def cmd_load(args) -> int:
     db = Mssql(conn)
     try:
         db.ensure_tables()
-        cars = db.inventory_vins()
+        cars = _vin_file(args.vins) if args.vins else db.inventory_vins()
         bad = [c for c in cars if not VIN_RE.match(c["vin"] or "")]
         cars = [c for c in cars if c not in bad]
         if bad:
             print(f"ignoring {len(bad)} inventory row(s) with an invalid VIN")
-        full = args.limit is None
+        full = args.limit is None and not args.vins
         if not full:
             cars = cars[:args.limit]
         unmapped = sorted({c["dealer_code"] for c in cars} - set(stores))
@@ -135,6 +147,8 @@ def main(argv: list[str] | None = None) -> int:
     r.set_defaults(func=cmd_recommendations)
     ld = sub.add_parser("load", help="check each used-inventory VIN at its current store and write results to SQL Server")
     ld.add_argument("--limit", type=int, help="only the first N VINs (doesn't update which VINs are in inventory)")
+    ld.add_argument("--vins", metavar="CSV", help="check these VINs (columns vin, dealer_code, optional stock_no) instead "
+                    "of used inventory; they're never marked as in inventory")
     ld.add_argument("--workers", type=int, default=6, help="parallel API workers (default 6)")
     ld.add_argument("--skip-fresh", type=float, default=20, metavar="HOURS",
                     help="skip VINs checked without error in the last HOURS (default 20; 0 = recheck all)")

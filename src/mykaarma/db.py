@@ -52,28 +52,32 @@ class Mssql:
         return {r[0] for r in self._rows(f"select vin from {T_LOOKUPS} where error is null and checked_at >= ?",
                                          (now - timedelta(hours=hours),))}
 
-    def _upsert_lookup(self, cur, lookup: dict, cols: tuple[str, ...]) -> None:
-        """Update `cols` on the VIN's lookup row, or insert it seen now. first_seen is never overwritten."""
-        cur.execute(f"update {T_LOOKUPS} set {', '.join(f'[{c}] = ?' for c in cols)}, in_inventory = 1 where vin = ?",
-                    [lookup[c] for c in cols] + [lookup["vin"]])
+    def _upsert_lookup(self, cur, lookup: dict, cols: tuple[str, ...], in_stock: bool) -> None:
+        """Update `cols` on the VIN's lookup row, or insert it seen now. first_seen is never overwritten. A VIN checked
+        with in_stock False (load --vins) is never flagged as in inventory; a new row for it gets in_inventory = 0."""
+        in_stock = int(in_stock)
+        cur.execute(f"update {T_LOOKUPS} set {', '.join(f'[{c}] = ?' for c in cols)}, "
+                    f"in_inventory = case when ? = 1 then 1 else in_inventory end where vin = ?",
+                    [lookup[c] for c in cols] + [in_stock, lookup["vin"]])
         if cur.rowcount == 0:
-            row = {**lookup, "in_inventory": 1, "first_seen": lookup["checked_at"], "last_seen": lookup["checked_at"]}
+            row = {**lookup, "in_inventory": in_stock, "first_seen": lookup["checked_at"], "last_seen": lookup["checked_at"]}
             cur.execute(_insert(T_LOOKUPS, LOOKUP_COLS + INVENTORY_COLS), [row[c] for c in LOOKUP_COLS + INVENTORY_COLS])
 
-    def replace_vin(self, lookup: dict, inspections: list[dict], recs: list[dict], associates: list[dict]) -> None:
+    def replace_vin(self, lookup: dict, inspections: list[dict], recs: list[dict], associates: list[dict],
+                    in_stock: bool = True) -> None:
         """One transaction per VIN. Success replaces its inspection rows; an error only updates the lookup, so the
         previous inspections stay and the next run retries the VIN."""
         cur = self.con.cursor()
         vin = lookup["vin"]
         try:
             if lookup["error"]:
-                self._upsert_lookup(cur, lookup, tuple(c for c in LOOKUP_COLS if c not in ("vin", "inspections_found")))
+                self._upsert_lookup(cur, lookup, tuple(c for c in LOOKUP_COLS if c not in ("vin", "inspections_found")), in_stock)
             else:
                 sub = f"select mpi_uuid from {T_INSPECTIONS} where vin = ?"
                 cur.execute(f"delete from {T_ASSOC} where mpi_uuid in ({sub})", (vin,))
                 cur.execute(f"delete from {T_RECS} where vin = ?", (vin,))
                 cur.execute(f"delete from {T_INSPECTIONS} where vin = ?", (vin,))
-                self._upsert_lookup(cur, lookup, tuple(c for c in LOOKUP_COLS if c != "vin"))
+                self._upsert_lookup(cur, lookup, tuple(c for c in LOOKUP_COLS if c != "vin"), in_stock)
                 for table, cols, rows in ((T_INSPECTIONS, INSPECTION_COLS, inspections),
                                           (T_RECS, RECOMMENDATION_COLS, recs), (T_ASSOC, ASSOCIATE_COLS, associates)):
                     if rows:

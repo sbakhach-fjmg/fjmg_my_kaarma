@@ -17,7 +17,8 @@ from mykaarma.client import ApiError, MyKaarma
 
 class Sink(Protocol):
     def fresh_vins(self, hours: float, now: datetime) -> set[str]: ...
-    def replace_vin(self, lookup: dict, inspections: list[dict], recs: list[dict], associates: list[dict]) -> None: ...
+    def replace_vin(self, lookup: dict, inspections: list[dict], recs: list[dict], associates: list[dict],
+                    in_stock: bool = True) -> None: ...
     def mark_inventory(self, in_stock: list[str], now: datetime) -> int: ...
 
 
@@ -27,6 +28,7 @@ class VinResult:
     inspections: list[dict] = field(default_factory=list)
     recs: list[dict] = field(default_factory=list)
     associates: list[dict] = field(default_factory=list)
+    in_stock: bool = True   # False for VINs from load --vins: never flagged as in inventory
 
 
 def utcnow() -> datetime:
@@ -38,7 +40,7 @@ def check_vin(mk: MyKaarma, car: dict, depts: list[dict]) -> VinResult:
     now = utcnow()
     res = VinResult({"vin": car["vin"], "stock_no": car.get("stock_no"), "dealer_code": car.get("dealer_code"),
                      "checked_at": now, "departments_checked": 0, "departments_failed": 0,
-                     "inspections_found": 0, "error": None})
+                     "inspections_found": 0, "error": None}, in_stock=car.get("in_stock", True))
     errors = []
     for d in depts:
         res.lookup["departments_checked"] += 1
@@ -67,7 +69,7 @@ def store_departments(stores: dict[str, dict]) -> dict[str, dict]:
 def _failed(car: dict, departments_checked: int, error: str) -> VinResult:
     return VinResult({"vin": car["vin"], "stock_no": car.get("stock_no"), "dealer_code": car.get("dealer_code"),
                       "checked_at": utcnow(), "departments_checked": departments_checked, "departments_failed": 0,
-                      "inspections_found": 0, "error": error})
+                      "inspections_found": 0, "error": error}, in_stock=car.get("in_stock", True))
 
 
 def run(cars: list[dict], stores: dict[str, dict], sink: Sink, make_client: Callable[[], MyKaarma], *,
@@ -107,11 +109,11 @@ def run(cars: list[dict], stores: dict[str, dict], sink: Sink, make_client: Call
             for fut in as_completed([pool.submit(work, c) for c in todo]):
                 res = fut.result()
                 try:
-                    sink.replace_vin(res.lookup, res.inspections, res.recs, res.associates)
+                    sink.replace_vin(res.lookup, res.inspections, res.recs, res.associates, in_stock=res.in_stock)
                 except Exception as e:   # a row the tables can't hold fails this VIN; a dead connection still stops the run
                     res = _failed(res.lookup, res.lookup["departments_checked"],
                                   f"database write failed: {type(e).__name__}: {e}"[:400])
-                    sink.replace_vin(res.lookup, [], [], [])
+                    sink.replace_vin(res.lookup, [], [], [], in_stock=res.in_stock)
                 stats["checked"] += 1
                 stats["errors"] += bool(res.lookup["error"])
                 stats["inspections"] += len(res.inspections)
