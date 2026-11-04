@@ -16,6 +16,9 @@ SUMMARY = {"uuid": "mpi-1", "status": "Completed", "recommendedTotal": 900.0, "a
            "orderIdentifiers": {"orderUUID": "order-1", "orderNumber": "R123", "orderDate": "2026-10-22", "orderStatus": "C"},
            "mpiCounts": {"totalRecommendationCount": 3, "approveCount": 1, "declineCount": 1},
            "customerIdentifiers": {"customerName": "Pat Customer", "customerUUID": "cust-1"},
+           "mpiFlags": {"sentToName": "Pat Customer", "sentToNumber": "+15550001111", "sentToCustomerOn": 1761100000000},
+           "mpiSecondaryFlags": {"videoOnlySentToName": "Pat Customer", "videoOnlySentToNumber": "pat@example.com",
+                                 "videoViewCount": 2},
            "dealerAssociateIdentifiers": {"dealerAssociateUUID": "sa-1", "dealerAssociateName": "Sam Advisor"},
            "technicianIdentifiers": [{"dealerAssociateUUID": "t-1", "dealerAssociateName": "Tess Tech"},
                                      {"dealerAssociateUUID": "t-2", "dealerAssociateName": "Theo Tech"}],
@@ -23,7 +26,7 @@ SUMMARY = {"uuid": "mpi-1", "status": "Completed", "recommendedTotal": 900.0, "a
 DETAIL = {**SUMMARY, "mpiSections": [{"name": "Tires", "checks": [
     {"name": "Front tires", "laborOpCode": "TIRE2", "fieldList": [{"state": "green"}, {"state": "red"}],
      "recommendations": [
-         {"uuid": "r-1", "status": "approved", "approvalState": "approved", "approverName": "Sam Advisor",
+         {"uuid": "r-1", "status": "approved", "approvalState": "approved", "approverName": "Pat Customer",
           "amount": {"amount": 600.0, "unit": "USD"}, "createdOn": 1761100000000,
           "lastUpdatedBy": {"dealerAssociateUUID": "sa-1", "dealerAssociateName": "Sam Advisor"}},
          {"uuid": "slot", "status": None}]},
@@ -40,10 +43,12 @@ def test_extract_rows():
     assert insp["mpi_created_on"] == datetime(2025, 10, 22, 2, 26, 40)
     raw = json.loads(insp["raw"])
     assert "customerIdentifiers" not in raw and raw["dealerAssociateIdentifiers"]["dealerAssociateName"] == "Sam Advisor"
-    assert "Pat Customer" not in insp["raw"]
+    for pii in ("Pat Customer", "+15550001111", "pat@example.com", "cust-1"):
+        assert pii not in insp["raw"] and all(pii not in str(r) for r in recs + assoc)
+    assert raw["mpiFlags"] == {"sentToCustomerOn": 1761100000000} and raw["mpiSecondaryFlags"] == {"videoViewCount": 2}
     assert [(r["recommendation_uuid"], r["severity"], r["severity_rank"], r["decision"], r["amount"]) for r in recs] == [
         ("r-1", "red", 3, "approved", 600.0), ("r-2", "yellow", 2, "declined", 300.0), ("r-3", "red", 3, "pending", None)]
-    assert recs[0]["op_code"] == "TIRE2" and recs[0]["last_updated_by"] == "Sam Advisor" and recs[0]["approver_name"] == "Sam Advisor"
+    assert recs[0]["op_code"] == "TIRE2" and recs[0]["last_updated_by"] == "Sam Advisor"
     assert [(a["role"], a["associate_uuid"]) for a in assoc] == [
         ("advisor", "sa-1"), ("technician", "t-1"), ("technician", "t-2"), ("assignee", "t-1")]
 

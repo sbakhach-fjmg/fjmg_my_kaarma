@@ -59,7 +59,7 @@ A full run covers about 1,600 VINs in under 5 minutes.
 | Table | One row per |
 |---|---|
 | `src_mykaarma__vin_lookups` | VIN ever checked: when, at which store, how many inspections, `error` (null = OK), and `in_inventory`, `first_seen`, `last_seen` |
-| `src_mykaarma__inspections` | inspection (one per RO), with myKaarma's own totals (`mk_*`) and the raw JSON minus customer identifiers |
+| `src_mykaarma__inspections` | inspection (one per RO), with myKaarma's own totals (`mk_*`) and the raw JSON minus customer PII (`extract.PII_KEYS`: customer identifiers, who the MPI or video was sent to, approver name) |
 | `src_mykaarma__recommendations` | recommended line: check, description, severity, status, decision, amount, op code |
 | `src_mykaarma__inspection_associates` | employee on an inspection: advisor, technician or assignee |
 

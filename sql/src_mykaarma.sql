@@ -2,7 +2,7 @@
 -- Run in SSMS against the database that holds Current_Inventory. `uv run mykaarma load` fills the tables.
 -- Each load replaces a VIN's inspection rows (myKaarma returns all of a VIN's inspections, so past ROs stay).
 -- VINs that leave used inventory are kept with in_inventory = 0 and their last known state.
--- Customer identifiers are never stored; employee identifiers are (inspection_associates, approver/last_updated_by).
+-- Customer PII is never stored (see extract.PII_KEYS); employee identifiers are (inspection_associates, last_updated_by).
 
 if object_id('dbo.src_mykaarma__vin_lookups', 'U') is null
 create table dbo.src_mykaarma__vin_lookups (
@@ -35,7 +35,7 @@ create table dbo.src_mykaarma__inspections (
 	mk_rec_count int, mk_approve_count int, mk_decline_count int,
 	mpi_created_on datetime2(0), mpi_updated_on datetime2(0),             -- UTC
 	loaded_at datetime2(0) not null,
-	raw nvarchar(max)                              -- get-MPI detail JSON minus customerIdentifiers; storage only on 2014
+	raw nvarchar(max)                              -- get-MPI detail JSON minus customer PII keys; storage only on 2014
 );
 if col_length('dbo.src_mykaarma__inspections', 'mpi_status') < 100       -- widen tables created before this fix
 	alter table dbo.src_mykaarma__inspections alter column mpi_status varchar(100);
@@ -53,10 +53,13 @@ create table dbo.src_mykaarma__recommendations (
 	decision varchar(10) not null,                 -- approved / declined / pending
 	amount decimal(12,2),                          -- null = not priced yet
 	op_code varchar(50),
-	approver_name nvarchar(200), last_updated_by nvarchar(200),
+	last_updated_by nvarchar(200),
 	rec_created_on datetime2(0), rec_updated_on datetime2(0),
 	loaded_at datetime2(0) not null
 );
+-- approver_name could hold a customer's name (approved through the MPI link); drop it from older tables
+if col_length('dbo.src_mykaarma__recommendations', 'approver_name') is not null
+	alter table dbo.src_mykaarma__recommendations drop column approver_name;
 -- widen tables created before these limits were raised (col_length is in bytes: 2 per nvarchar character)
 if col_length('dbo.src_mykaarma__recommendations', 'section') < 800
 	alter table dbo.src_mykaarma__recommendations alter column section nvarchar(400);
